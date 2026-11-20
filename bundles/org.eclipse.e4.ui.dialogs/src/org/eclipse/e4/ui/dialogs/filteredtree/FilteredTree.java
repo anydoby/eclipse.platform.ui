@@ -24,13 +24,20 @@ import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.e4.ui.dialogs.textbundles.E4DialogMessages;
 import org.eclipse.jface.resource.JFaceResources;
 import org.eclipse.jface.viewers.AbstractFilteredViewerComposite;
+import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
+import org.eclipse.jface.viewers.IBaseLabelProvider;
 import org.eclipse.jface.viewers.IContentProvider;
 import org.eclipse.jface.viewers.IElementComparer;
+import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.jface.viewers.ISelection;
+import org.eclipse.jface.viewers.ITreeContentProvider;
+import org.eclipse.jface.viewers.ITreePathContentProvider;
 import org.eclipse.jface.viewers.ITreeSelection;
 import org.eclipse.jface.viewers.TreePath;
 import org.eclipse.jface.viewers.TreeSelection;
 import org.eclipse.jface.viewers.TreeViewer;
+import org.eclipse.jface.viewers.ViewerComparator;
+import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.osgi.util.NLS;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.accessibility.AccessibleAdapter;
@@ -200,6 +207,104 @@ public class FilteredTree extends AbstractFilteredViewerComposite<PatternFilter>
 			}
 		}
 		return null;
+	}
+
+	/**
+	 * Selects the best match in quick selection mode. An element with a label
+	 * equal to the filter text is the best match, then an element with a label
+	 * that starts with the filter text, then all other matches. Equal matches are
+	 * compared by their position in the tree. Also elements in collapsed branches
+	 * are compared. A matching selection stays when the filter text was made
+	 * shorter, or when no other element is a better match.
+	 */
+	private void selectBestMatch(String text) {
+		boolean widened = quickSelectionText != null && quickSelectionText.length() > text.length()
+				&& quickSelectionText.startsWith(text);
+		quickSelectionText = text;
+		int[] bestRank = { Integer.MAX_VALUE };
+		for (TreePath path : treeViewer.getStructuredSelection().getPaths()) {
+			Object element = path.getLastSegment();
+			int rank = matchRank(element, text);
+			if (rank < bestRank[0] && isSelectableMatch(element)) {
+				bestRank[0] = rank;
+			}
+		}
+		if (widened && bestRank[0] != Integer.MAX_VALUE) {
+			return;
+		}
+		TreePath[] best = new TreePath[1];
+		findBestMatch(TreePath.EMPTY, text, best, bestRank);
+		if (best[0] != null) {
+			treeViewer.setSelection(new TreeSelection(best[0]), true);
+		}
+	}
+
+	private void findBestMatch(TreePath parentPath, String text, TreePath[] best, int[] bestRank) {
+		for (Object element : getFilteredChildren(parentPath)) {
+			if (bestRank[0] == 0) {
+				return;
+			}
+			TreePath path = parentPath.createChildPath(element);
+			int rank = matchRank(element, text);
+			if (rank < bestRank[0] && isSelectableMatch(element)) {
+				best[0] = path;
+				bestRank[0] = rank;
+			}
+			findBestMatch(path, text, best, bestRank);
+		}
+	}
+
+	/**
+	 * Returns the children as the tree shows them, also for a collapsed parent.
+	 */
+	private Object[] getFilteredChildren(TreePath parentPath) {
+		Object input = treeViewer.getInput();
+		boolean root = parentPath.getSegmentCount() == 0;
+		Object[] children = null;
+		IContentProvider provider = treeViewer.getContentProvider();
+		if (provider instanceof ITreePathContentProvider pathProvider) {
+			children = root ? pathProvider.getElements(input) : pathProvider.getChildren(parentPath);
+		} else if (provider instanceof ITreeContentProvider treeProvider) {
+			children = root ? treeProvider.getElements(input) : treeProvider.getChildren(parentPath.getLastSegment());
+		}
+		if (children == null || children.length == 0) {
+			return new Object[0];
+		}
+		for (ViewerFilter filter : treeViewer.getFilters()) {
+			children = root ? filter.filter(treeViewer, input, children)
+					: filter.filter(treeViewer, parentPath, children);
+		}
+		ViewerComparator comparator = treeViewer.getComparator();
+		if (comparator != null) {
+			children = children.clone();
+			comparator.sort(treeViewer, children);
+		}
+		return children;
+	}
+
+	private boolean isSelectableMatch(Object element) {
+		return getPatternFilter().isLeafMatch(treeViewer, element)
+				&& getPatternFilter().isElementSelectable(element);
+	}
+
+	private int matchRank(Object element, String text) {
+		String label = null;
+		IBaseLabelProvider labelProvider = treeViewer.getLabelProvider();
+		if (labelProvider instanceof ILabelProvider provider) {
+			label = provider.getText(element);
+		} else if (labelProvider instanceof DelegatingStyledCellLabelProvider provider) {
+			label = provider.getStyledStringProvider().getStyledText(element).getString();
+		}
+		if (label == null) {
+			return 2;
+		}
+		if (label.equalsIgnoreCase(text)) {
+			return 0;
+		}
+		if (label.regionMatches(true, 0, text, 0, text.length())) {
+			return 1;
+		}
+		return 2;
 	}
 
 	/**
@@ -460,6 +565,9 @@ public class FilteredTree extends AbstractFilteredViewerComposite<PatternFilter>
 	}
 
 	private void updateTreeSelection(boolean setFocus) {
+		if (filterText.getText().trim().isEmpty()) {
+			quickSelectionText = null;
+		}
 		Tree tree = getViewer().getTree();
 		if (tree.getItemCount() == 0) {
 			return;
@@ -469,6 +577,10 @@ public class FilteredTree extends AbstractFilteredViewerComposite<PatternFilter>
 		boolean hasFocus = setFocus ? tree.setFocus() : true;
 		boolean textChanged = !getInitialText().equals(filterText.getText().trim());
 		if (hasFocus && textChanged && filterText.getText().trim().length() > 0) {
+			if (quickSelectionMode) {
+				selectBestMatch(filterText.getText().trim());
+				return;
+			}
 			TreeItem item;
 			if (tree.getSelectionCount() > 0) {
 				item = getFirstMatchingItem(tree.getSelection());
@@ -485,8 +597,10 @@ public class FilteredTree extends AbstractFilteredViewerComposite<PatternFilter>
 
 	/**
 	 * Sets whether this filtered tree is used to make quick selections. In this
-	 * mode the first match in the tree is automatically selected while filtering
-	 * and the 'Enter' key is not used to move the focus to the tree.
+	 * mode the best match in the tree is automatically selected while filtering
+	 * and the 'Enter' key is not used to move the focus to the tree. An item with
+	 * a label equal to the filter text is the best match, then an item with a
+	 * label that starts with the filter text, then the first other match.
 	 * <p>
 	 * By default, this is set to <code>false</code>.
 	 * </p>
@@ -507,6 +621,11 @@ public class FilteredTree extends AbstractFilteredViewerComposite<PatternFilter>
 	private String previousFilterText;
 
 	private boolean narrowingDown;
+
+	/**
+	 * The filter text of the last quick selection, or <code>null</code>.
+	 */
+	private String quickSelectionText;
 
 	@Override
 	protected void textChanged() {

@@ -17,10 +17,14 @@ package org.eclipse.ui.tests.filteredtree;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
+import java.util.List;
+import java.util.Map;
+
 import org.eclipse.e4.ui.dialogs.filteredtree.FilteredTree;
 import org.eclipse.e4.ui.dialogs.filteredtree.PatternFilter;
 import org.eclipse.jface.tests.viewers.TestElement;
 import org.eclipse.jface.tests.viewers.TestModelContentProvider;
+import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.LabelProvider;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.swt.SWT;
@@ -83,6 +87,61 @@ public class E4FilteredTreeTests {
 				() -> viewer.getTree().getItemCount() == 0));
 
 		assertTrue(viewer.getStructuredSelection().isEmpty());
+	}
+
+	@Test
+	public void testQuickSelectionModeSelectsEqualLabel() {
+		useFileTree();
+
+		assertQuickSelection("File", "File");
+	}
+
+	@Test
+	public void testQuickSelectionModeAfterEditsBeforeRefresh() {
+		useFileTree();
+		assertQuickSelection("Fil", "Files");
+
+		filteredTree.getFilterControl().setText("Filex");
+		assertQuickSelection("File", "File");
+	}
+
+	// "Project from File" is the first match for "File", but not the best one
+	private void useFileTree() {
+		Map<Object, List<String>> children = Map.of( //
+				"", List.of("Project from File", "Files", "General"), //
+				"General", List.of("File", "Untitled Text File"));
+		TreeViewer viewer = filteredTree.getViewer();
+		viewer.setContentProvider(new ITreeContentProvider() {
+			@Override
+			public Object[] getElements(Object inputElement) {
+				return getChildren(inputElement);
+			}
+
+			@Override
+			public Object[] getChildren(Object parentElement) {
+				return children.getOrDefault(parentElement, List.of()).toArray();
+			}
+
+			@Override
+			public Object getParent(Object element) {
+				return null;
+			}
+
+			@Override
+			public boolean hasChildren(Object element) {
+				return children.containsKey(element);
+			}
+		});
+		viewer.setInput("");
+		filteredTree.setQuickSelectionMode(true);
+	}
+
+	private void assertQuickSelection(String filter, String expected) {
+		TreeViewer viewer = filteredTree.getViewer();
+		filteredTree.getFilterControl().setText(filter);
+		DisplayHelper.waitForCondition(shell.getDisplay(), 5000,
+				() -> expected.equals(viewer.getStructuredSelection().getFirstElement()));
+		assertEquals(expected, viewer.getStructuredSelection().getFirstElement());
 	}
 
 	private void applyFilter(String text) {
