@@ -24,16 +24,20 @@ import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.e4.ui.dialogs.textbundles.E4DialogMessages;
 import org.eclipse.jface.resource.JFaceResources;
 import org.eclipse.jface.viewers.AbstractFilteredViewerComposite;
+import org.eclipse.jface.viewers.ColumnLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
 import org.eclipse.jface.viewers.IContentProvider;
 import org.eclipse.jface.viewers.IElementComparer;
 import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.jface.viewers.ISelection;
+import org.eclipse.jface.viewers.ITableLabelProvider;
 import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.ITreePathContentProvider;
 import org.eclipse.jface.viewers.ITreeSelection;
+import org.eclipse.jface.viewers.StyledString;
 import org.eclipse.jface.viewers.TreePath;
+import org.eclipse.jface.viewers.TreePathViewerSorter;
 import org.eclipse.jface.viewers.TreeSelection;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.ViewerComparator;
@@ -221,28 +225,41 @@ public class FilteredTree extends AbstractFilteredViewerComposite<PatternFilter>
 		boolean widened = quickSelectionText != null && quickSelectionText.length() > text.length()
 				&& quickSelectionText.startsWith(text);
 		quickSelectionText = text;
+		TreePath[] selected = treeViewer.getStructuredSelection().getPaths();
 		int[] bestRank = { Integer.MAX_VALUE };
-		for (TreePath path : treeViewer.getStructuredSelection().getPaths()) {
+		for (TreePath path : selected) {
 			Object element = path.getLastSegment();
 			int rank = matchRank(element, text);
 			if (rank < bestRank[0] && isSelectableMatch(element)) {
 				bestRank[0] = rank;
 			}
 		}
-		if (widened && bestRank[0] != Integer.MAX_VALUE) {
-			return;
-		}
 		TreePath[] best = new TreePath[1];
-		findBestMatch(TreePath.EMPTY, text, best, bestRank);
+		if (!widened || bestRank[0] == Integer.MAX_VALUE) {
+			long stopTime = System.currentTimeMillis() + SOFT_MAX_EXPAND_TIME;
+			findBestMatch(TreePath.EMPTY, text, best, bestRank, stopTime);
+		}
 		if (best[0] != null) {
 			treeViewer.setSelection(new TreeSelection(best[0]), true);
+		} else if (selected.length > 0) {
+			treeViewer.reveal(selected[0]);
 		}
 	}
 
-	private void findBestMatch(TreePath parentPath, String text, TreePath[] best, int[] bestRank) {
+	/**
+	 * Searches the tree in tree order until it finds an equal label or the time
+	 * is over.
+	 *
+	 * @return <code>false</code> if the search must stop
+	 */
+	private boolean findBestMatch(TreePath parentPath, String text, TreePath[] best, int[] bestRank,
+			long stopTime) {
 		for (Object element : getFilteredChildren(parentPath)) {
-			if (bestRank[0] == 0) {
-				return;
+			if (bestRank[0] == 0 || System.currentTimeMillis() > stopTime) {
+				return false;
+			}
+			if (isOnPath(parentPath, element)) {
+				continue;
 			}
 			TreePath path = parentPath.createChildPath(element);
 			int rank = matchRank(element, text);
@@ -250,8 +267,20 @@ public class FilteredTree extends AbstractFilteredViewerComposite<PatternFilter>
 				best[0] = path;
 				bestRank[0] = rank;
 			}
-			findBestMatch(path, text, best, bestRank);
+			if (!findBestMatch(path, text, best, bestRank, stopTime)) {
+				return false;
+			}
 		}
+		return true;
+	}
+
+	private static boolean isOnPath(TreePath path, Object element) {
+		for (int i = 0; i < path.getSegmentCount(); i++) {
+			if (path.getSegment(i).equals(element)) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**
@@ -260,24 +289,30 @@ public class FilteredTree extends AbstractFilteredViewerComposite<PatternFilter>
 	private Object[] getFilteredChildren(TreePath parentPath) {
 		Object input = treeViewer.getInput();
 		boolean root = parentPath.getSegmentCount() == 0;
+		Object parent = root ? input : parentPath.getLastSegment();
 		Object[] children = null;
 		IContentProvider provider = treeViewer.getContentProvider();
 		if (provider instanceof ITreePathContentProvider pathProvider) {
 			children = root ? pathProvider.getElements(input) : pathProvider.getChildren(parentPath);
 		} else if (provider instanceof ITreeContentProvider treeProvider) {
-			children = root ? treeProvider.getElements(input) : treeProvider.getChildren(parentPath.getLastSegment());
+			children = root ? treeProvider.getElements(input) : treeProvider.getChildren(parent);
 		}
 		if (children == null || children.length == 0) {
 			return new Object[0];
 		}
+		boolean usePath = !root && provider instanceof ITreePathContentProvider;
 		for (ViewerFilter filter : treeViewer.getFilters()) {
-			children = root ? filter.filter(treeViewer, input, children)
-					: filter.filter(treeViewer, parentPath, children);
+			children = usePath ? filter.filter(treeViewer, parentPath, children)
+					: filter.filter(treeViewer, parent, children);
 		}
 		ViewerComparator comparator = treeViewer.getComparator();
 		if (comparator != null) {
 			children = children.clone();
-			comparator.sort(treeViewer, children);
+			if (comparator instanceof TreePathViewerSorter sorter) {
+				sorter.sort(treeViewer, parentPath, children);
+			} else {
+				comparator.sort(treeViewer, children);
+			}
 		}
 		return children;
 	}
@@ -288,13 +323,7 @@ public class FilteredTree extends AbstractFilteredViewerComposite<PatternFilter>
 	}
 
 	private int matchRank(Object element, String text) {
-		String label = null;
-		IBaseLabelProvider labelProvider = treeViewer.getLabelProvider();
-		if (labelProvider instanceof ILabelProvider provider) {
-			label = provider.getText(element);
-		} else if (labelProvider instanceof DelegatingStyledCellLabelProvider provider) {
-			label = provider.getStyledStringProvider().getStyledText(element).getString();
-		}
+		String label = getLabel(element);
 		if (label == null) {
 			return 2;
 		}
@@ -305,6 +334,28 @@ public class FilteredTree extends AbstractFilteredViewerComposite<PatternFilter>
 			return 1;
 		}
 		return 2;
+	}
+
+	/**
+	 * Returns the text of the first column of the element.
+	 */
+	private String getLabel(Object element) {
+		IBaseLabelProvider labelProvider = treeViewer.getLabelProvider();
+		if (labelProvider instanceof ITableLabelProvider provider) {
+			return provider.getColumnText(element, 0);
+		}
+		if (treeViewer.getTree().getColumnCount() > 0
+				&& treeViewer.getLabelProvider(0) instanceof ColumnLabelProvider provider) {
+			return provider.getText(element);
+		}
+		if (labelProvider instanceof ILabelProvider provider) {
+			return provider.getText(element);
+		}
+		if (labelProvider instanceof DelegatingStyledCellLabelProvider provider) {
+			StyledString text = provider.getStyledStringProvider().getStyledText(element);
+			return text == null ? null : text.getString();
+		}
+		return null;
 	}
 
 	/**
