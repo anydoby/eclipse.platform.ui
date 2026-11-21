@@ -146,7 +146,8 @@ public class CleanDialog extends MessageDialog {
 		}
 		//save all dirty editors
 		BuildUtilities.saveEditors(null);
-		//batching changes ensures that autobuild runs after cleaning
+		// No job rule: the builds take the rules they need. A rule for the whole
+		// workspace would block every other project while the cleaned projects build.
 		WorkspaceJob cleanJob = new WorkspaceJob(
 				cleanAll ? IDEWorkbenchMessages.CleanDialog_cleanAllTaskName
 						: IDEWorkbenchMessages.CleanDialog_cleanSelectedTaskName) {
@@ -176,14 +177,12 @@ public class CleanDialog extends MessageDialog {
 							new ProjectSubsetBuildAction(window,
 								IncrementalProjectBuilder.INCREMENTAL_BUILD,
 								projects);
-						projectBuild.runInBackground(
-								ResourcesPlugin.getWorkspace().getRuleFactory().buildRule());
+						projectBuild.runInBackground(null);
 					}
 				}
 				return Status.OK_STATUS;
 			}
 		};
-		cleanJob.setRule(ResourcesPlugin.getWorkspace().getRuleFactory().buildRule());
 		cleanJob.setUser(true);
 		cleanJob.setProperty(IProgressConstants2.SHOW_IN_TASKBAR_ICON_PROPERTY, Boolean.TRUE);
 		cleanJob.schedule();
